@@ -876,7 +876,9 @@ def main() -> None:
         }
 
         [data-testid="stAppScrollToBottomContainer"] {
-            overflow: visible;
+            overflow-y: auto;
+            overflow-x: hidden;
+            -webkit-overflow-scrolling: touch;
         }
 
         [data-testid="stVerticalBlock"] {
