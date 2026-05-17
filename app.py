@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -58,6 +59,46 @@ AI_ERROR_HINTS = {
     "gemini_server_error": "Google Gemini 服務暫時異常，請稍後重試。",
     "gemini_api_error": "Google Gemini 呼叫失敗，請確認網路、API 設定與服務狀態。",
     "empty_response": "AI 回傳內容為空，請稍後重試或改寫問題。",
+}
+
+AI_RETRY_HINTS = {
+    "ai_timeout": "建議 20 到 30 秒後重試 1 次；若連續失敗請改由人工客服接手。",
+    "openai_api_error": "可能是供應商暫時壅塞，建議稍後重試；若連續 2 次失敗請轉人工客服。",
+    "gemini_server_error": "Google 服務暫時異常，建議 30 秒後重試；若仍失敗請轉人工客服。",
+    "gemini_api_error": "網路或 API 服務不穩，建議稍後重試 1 次。",
+    "empty_response": "請將問題改短且更明確後重試，若仍無回覆建議轉人工客服。",
+    "gemini_quota_exceeded": "此錯誤通常重試無效，請等待配額重置或更換可用 API Key。",
+    "gemini_invalid_api_key": "此錯誤通常重試無效，請先更新有效 API Key。",
+    "gemini_key_restricted": "此錯誤通常重試無效，請先解除 API Key 的來源限制。",
+    "gemini_api_not_enabled": "此錯誤通常重試無效，請先啟用 Generative Language API。",
+    "gemini_model_not_found": "請先調整 GEMINI_MODEL（建議 gemini-2.0-flash-lite）後再重試。",
+    "gemini_bad_request": "請先檢查模型與設定格式，修正後再重試。",
+}
+
+HUMAN_HANDOFF_KEYWORDS = [
+    "人工客服",
+    "真人",
+    "專人",
+    "電話",
+    "客訴",
+    "申訴",
+    "緊急",
+    "退款",
+    "退費",
+    "取消訂單",
+    "改地址",
+    "扣款",
+    "發票",
+    "統編",
+    "個資",
+    "信用卡",
+]
+
+HUMAN_HANDOFF_CATEGORY_KEYWORDS = {
+    "訂單查詢": ["訂單", "單號", "地址", "取消"],
+    "付款方式": ["扣款", "刷卡", "付款失敗", "退款"],
+    "退換貨": ["退款", "退貨", "瑕疵", "換貨"],
+    "發票問題": ["發票", "統編", "抬頭"],
 }
 
 
@@ -209,6 +250,41 @@ def build_ai_error_hint(error_code: Optional[str], model_name: str) -> str:
         return f"{base_hint}（目前設定：{model_name}）"
 
     return base_hint
+
+
+def build_retry_hint(error_code: Optional[str]) -> str:
+    """依錯誤碼提供可執行的重試建議。"""
+    if not error_code:
+        return ""
+
+    return AI_RETRY_HINTS.get(error_code, "建議稍後再重試 1 次，若仍失敗請改由人工客服接手。")
+
+
+def should_suggest_human_transfer(
+    user_question: str,
+    category: str,
+    answer_text: str = "",
+    error_code: Optional[str] = None,
+) -> bool:
+    """根據提問內容、分類與回覆語意，判斷是否應建議人工客服接手。"""
+    if error_code:
+        return True
+
+    normalized_question = normalize_text(user_question)
+
+    if any(keyword in normalized_question for keyword in HUMAN_HANDOFF_KEYWORDS):
+        return True
+
+    category_keywords = HUMAN_HANDOFF_CATEGORY_KEYWORDS.get(category, [])
+    if category_keywords and any(keyword in normalized_question for keyword in category_keywords):
+        return True
+
+    if answer_text and any(
+        keyword in answer_text for keyword in ["資料不足", "無法確認", "建議聯繫人工客服", "需由人工客服"]
+    ):
+        return True
+
+    return False
 
 CATEGORY_KEYWORDS = {
     "產品介紹": ["產品", "方案", "規格", "功能", "比較", "介紹"],
@@ -568,6 +644,9 @@ def init_session_state() -> None:
     if "chat_started_at" not in st.session_state:
         st.session_state.chat_started_at = current_timestamp()
 
+    if "auto_scroll_to_latest" not in st.session_state:
+        st.session_state.auto_scroll_to_latest = False
+
 
 def build_sidebar() -> None:
     """建立側邊欄客服資訊與系統說明。"""
@@ -683,6 +762,27 @@ def render_service_overview(ai_enabled: bool, mode_text: str, faq_count: int) ->
         )
 
 
+def scroll_to_latest_message() -> None:
+    """在訊息更新後自動捲到最新內容，避免使用者看不到回覆。"""
+    components.html(
+        """
+        <script>
+        const runScroll = () => {
+            const rootDoc = window.parent?.document;
+            if (!rootDoc) return;
+            const scroller = rootDoc.querySelector('[data-testid="stAppScrollToBottomContainer"]');
+            if (!scroller) return;
+            scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' });
+        };
+        runScroll();
+        setTimeout(runScroll, 120);
+        setTimeout(runScroll, 360);
+        </script>
+        """,
+        height=0,
+    )
+
+
 def show_quick_buttons() -> Optional[str]:
     """顯示常見問題快捷按鈕，回傳被點選的問題文字。"""
     st.markdown("### 常見問題快捷提問")
@@ -757,6 +857,12 @@ def build_answer(
     if best_faq and faq_score >= FAQ_MATCH_THRESHOLD:
         answer_text = str(best_faq.get("answer", "目前資料不足，建議您聯繫人工客服。"))
         category = str(best_faq.get("category", category))
+        suggest_human = should_suggest_human_transfer(
+            user_question=user_question,
+            category=category,
+            answer_text=answer_text,
+            error_code=None,
+        )
 
         return {
             "role": "assistant",
@@ -789,8 +895,12 @@ def build_answer(
     source = f"AI 智慧客服（{ai_source_label}）"
 
     if error_code is None and ai_answer:
-        # 若 AI 回覆中明確提到資料不足或人工客服，系統同步標示建議轉人工客服。
-        suggest_human = any(keyword in ai_answer for keyword in ["資料不足", "人工客服", "聯繫客服", "無法確認"])
+        suggest_human = should_suggest_human_transfer(
+            user_question=user_question,
+            category=category,
+            answer_text=ai_answer,
+            error_code=None,
+        )
 
         return {
             "role": "assistant",
@@ -811,6 +921,9 @@ def build_answer(
     error_hint = build_ai_error_hint(error_code, ai_model)
     if error_hint:
         fail_text = f"{fail_text}\n\n系統診斷建議：{error_hint}"
+    retry_hint = build_retry_hint(error_code)
+    if retry_hint:
+        fail_text = f"{fail_text}\n錯誤重試提示：{retry_hint}"
     if error_code:
         fail_text = f"{fail_text}\n系統診斷代碼：{error_code}"
 
@@ -1216,6 +1329,10 @@ def main() -> None:
             with st.chat_message("assistant", avatar="👩‍💼"):
                 render_assistant_message(message, index)
 
+    if st.session_state.get("auto_scroll_to_latest"):
+        scroll_to_latest_message()
+        st.session_state.auto_scroll_to_latest = False
+
     user_input = st.chat_input("請輸入您想詢問的內容，例如：如何申請退貨？")
     final_question = selected_quick_question if selected_quick_question else user_input
 
@@ -1265,6 +1382,7 @@ def main() -> None:
         assistant_message["agent_name"] = AGENT_PROFILE["name"]
         assistant_message["agent_title"] = AGENT_PROFILE["title"]
         st.session_state.messages.append(assistant_message)
+        st.session_state.auto_scroll_to_latest = True
 
         # 重新整理畫面，讓新訊息立即顯示。
         st.rerun()
