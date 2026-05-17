@@ -36,7 +36,7 @@ SYSTEM_PROMPT = """
 
 LOGGER = logging.getLogger(__name__)
 
-GEMINI_MODEL_FALLBACKS = ["gemini-2.0-flash", "gemini-1.5-flash-latest"]
+GEMINI_MODEL_FALLBACKS = ["gemini-2.0-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash-latest"]
 
 AI_ERROR_HINTS = {
     "missing_api_key": "尚未設定可用的 API Key，請先在 Secrets 或 .env 補上金鑰。",
@@ -45,7 +45,7 @@ AI_ERROR_HINTS = {
     "gemini_permission_denied": "目前的 Google API Key 權限不足，請確認是否開啟 Generative Language API 並允許伺服器端呼叫。",
     "gemini_api_not_enabled": "此 Google 專案尚未啟用 Generative Language API，請先在 Google Cloud / AI Studio 啟用後再試。",
     "gemini_key_restricted": "目前 API Key 設有 HTTP referrer/IP 限制，Streamlit 雲端伺服器無法使用；請改用可供伺服器端呼叫的金鑰。",
-    "gemini_quota_exceeded": "Google Gemini 配額已達上限，請檢查配額與計費設定後再試。",
+    "gemini_quota_exceeded": "Google Gemini 配額已達上限（免費配額為 15 RPM）。請到 Google AI Studio 重新產生一組新的 API Key 後更新 Secrets，或等待配額重置後再試。",
     "gemini_model_not_found": "目前設定的 GEMINI_MODEL 不可用，建議改為 gemini-2.0-flash。",
     "gemini_bad_request": "Gemini 請求格式或模型設定不被接受，請檢查 GEMINI_MODEL 與 API 設定。",
     "gemini_safety_block": "本次提問被安全政策攔截，請改寫提問內容後再試。",
@@ -410,6 +410,22 @@ def generate_openai_response(
         return None, "openai_api_error"
 
 
+def _build_gemini_payload(user_question: str, category: str, api_version: str) -> dict:
+    """依 API 版本組裝 payload；v1 不支援 systemInstruction，改嵌入 user 訊息。"""
+    user_text = build_ai_user_prompt(user_question, category)
+    if api_version == "v1beta":
+        return {
+            "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+            "contents": [{"role": "user", "parts": [{"text": user_text}]}],
+            "generationConfig": {"temperature": 0.3},
+        }
+    # v1: embed system prompt into user message
+    return {
+        "contents": [{"role": "user", "parts": [{"text": f"{SYSTEM_PROMPT}\n\n{user_text}"}]}],
+        "generationConfig": {"temperature": 0.3},
+    }
+
+
 def generate_gemini_response(
     api_key: str,
     user_question: str,
@@ -420,27 +436,13 @@ def generate_gemini_response(
     if not api_key:
         return None, "missing_api_key"
 
-    payload = {
-        "systemInstruction": {
-            "parts": [{"text": SYSTEM_PROMPT}],
-        },
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": build_ai_user_prompt(user_question, category)}],
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.3,
-        },
-    }
-
     candidate_models = [model_name]
     for fallback_model in GEMINI_MODEL_FALLBACKS:
         if fallback_model != model_name:
             candidate_models.append(fallback_model)
 
-    api_versions = ["v1", "v1beta"]
+    # v1beta 優先（完整支援 systemInstruction）；v1 作為相容備援
+    api_versions = ["v1beta", "v1"]
     last_error_code = "gemini_api_error"
 
     try:
@@ -450,6 +452,7 @@ def generate_gemini_response(
                     f"https://generativelanguage.googleapis.com/{api_version}/"
                     f"models/{candidate_model}:generateContent"
                 )
+                payload = _build_gemini_payload(user_question, category, api_version)
 
                 response = requests.post(
                     endpoint,
