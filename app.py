@@ -833,16 +833,21 @@ def main() -> None:
             background: linear-gradient(180deg, #edf3fb 0%, #f9fbff 40%, #ffffff 100%);
         }
 
+        :root {
+            --streamlit-header-height: 60px;
+            --main-top-safe-gap: calc(var(--streamlit-header-height) + 0.9rem);
+        }
+
         .block-container {
             max-width: 1180px;
-            padding-top: 2.5rem;
+            padding-top: var(--main-top-safe-gap);
             padding-bottom: 2rem;
             padding-left: 1.5rem;
             padding-right: 1.5rem;
             overflow: visible;
         }
 
-        [data-testid="stMain"] {
+        [data-testid="stAppScrollToBottomContainer"] {
             overflow: visible;
         }
 
@@ -850,7 +855,7 @@ def main() -> None:
             overflow: visible;
         }
 
-        [data-testid="column"] {
+        [data-testid="stColumn"] {
             overflow: visible;
         }
 
