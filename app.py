@@ -43,6 +43,8 @@ AI_ERROR_HINTS = {
     "openai_api_error": "OpenAI 呼叫失敗，請檢查金鑰、模型名稱與額度是否正常。",
     "gemini_invalid_api_key": "Google API Key 無效或已失效，請到 Google AI Studio 重新產生後更新 Secrets。",
     "gemini_permission_denied": "目前的 Google API Key 權限不足，請確認是否開啟 Generative Language API 並允許伺服器端呼叫。",
+    "gemini_api_not_enabled": "此 Google 專案尚未啟用 Generative Language API，請先在 Google Cloud / AI Studio 啟用後再試。",
+    "gemini_key_restricted": "目前 API Key 設有 HTTP referrer/IP 限制，Streamlit 雲端伺服器無法使用；請改用可供伺服器端呼叫的金鑰。",
     "gemini_quota_exceeded": "Google Gemini 配額已達上限，請檢查配額與計費設定後再試。",
     "gemini_model_not_found": "目前設定的 GEMINI_MODEL 不可用，建議改為 gemini-2.0-flash。",
     "gemini_bad_request": "Gemini 請求格式或模型設定不被接受，請檢查 GEMINI_MODEL 與 API 設定。",
@@ -155,6 +157,15 @@ def map_gemini_http_error(response: requests.Response) -> str:
 
     if "api key" in message_lower and ("invalid" in message_lower or "not valid" in message_lower):
         return "gemini_invalid_api_key"
+
+    if "api has not been used" in message_lower or "it is disabled" in message_lower:
+        return "gemini_api_not_enabled"
+
+    if "referer restrictions" in message_lower or "referrer restrictions" in message_lower:
+        return "gemini_key_restricted"
+
+    if "ip address restrictions" in message_lower:
+        return "gemini_key_restricted"
 
     if status_code == 404 or "not found for api version" in message_lower:
         return "gemini_model_not_found"
@@ -457,8 +468,8 @@ def generate_gemini_response(
                         candidate_model,
                     )
 
-                    # 模型不存在時，嘗試下一個 API 版本或備援模型。
-                    if last_error_code == "gemini_model_not_found":
+                    # 遇到模型不存在或參數不相容時，繼續嘗試下一個版本/模型。
+                    if last_error_code in {"gemini_model_not_found", "gemini_bad_request"}:
                         continue
 
                     return None, last_error_code
@@ -778,6 +789,8 @@ def build_answer(
     error_hint = build_ai_error_hint(error_code, ai_model)
     if error_hint:
         fail_text = f"{fail_text}\n\n系統診斷建議：{error_hint}"
+    if error_code:
+        fail_text = f"{fail_text}\n系統診斷代碼：{error_code}"
 
     return {
         "role": "assistant",
