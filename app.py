@@ -6,6 +6,7 @@ from pathlib import Path
 from random import randint
 from typing import Dict, List, Optional, Tuple
 
+import requests
 import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -46,6 +47,75 @@ def get_runtime_setting(key: str, default_value: str = "") -> str:
         return str(secret_value).strip() or default_value
     except Exception:
         return default_value
+
+
+def resolve_ai_config() -> Dict[str, str]:
+    """解析 AI 供應商設定，支援 OpenAI 與 Google Gemini。"""
+    provider_raw = get_runtime_setting("AI_PROVIDER", "auto").strip().lower()
+    openai_key = get_runtime_setting("OPENAI_API_KEY", "")
+    google_key = get_runtime_setting("GOOGLE_API_KEY", "")
+
+    # 兼容另一種常見命名，避免使用者更動變數名後無法讀取。
+    if not google_key:
+        google_key = get_runtime_setting("GEMINI_API_KEY", "")
+
+    openai_model = get_runtime_setting("OPENAI_MODEL", "gpt-4o-mini")
+    gemini_model = get_runtime_setting("GEMINI_MODEL", "gemini-1.5-flash")
+
+    if provider_raw == "openai":
+        return {
+            "provider": "openai",
+            "api_key": openai_key,
+            "model": openai_model,
+            "provider_label": "OpenAI",
+            "source_label": "OpenAI",
+        }
+
+    if provider_raw in ("gemini", "google"):
+        return {
+            "provider": "gemini",
+            "api_key": google_key,
+            "model": gemini_model,
+            "provider_label": "Google Gemini",
+            "source_label": "Google Gemini",
+        }
+
+    # AI_PROVIDER=auto 或未設定時，自動選擇目前可用金鑰。
+    if openai_key:
+        return {
+            "provider": "openai",
+            "api_key": openai_key,
+            "model": openai_model,
+            "provider_label": "自動偵測（OpenAI）",
+            "source_label": "OpenAI",
+        }
+
+    if google_key:
+        return {
+            "provider": "gemini",
+            "api_key": google_key,
+            "model": gemini_model,
+            "provider_label": "自動偵測（Google Gemini）",
+            "source_label": "Google Gemini",
+        }
+
+    return {
+        "provider": "openai",
+        "api_key": "",
+        "model": openai_model,
+        "provider_label": "自動偵測（未設定金鑰）",
+        "source_label": "AI",
+    }
+
+
+def build_ai_user_prompt(user_question: str, category: str) -> str:
+    """統一組裝 AI 問答 prompt，確保不同供應商語氣一致。"""
+    return (
+        f"使用者問題分類：{category}\n"
+        f"使用者問題：{user_question}\n\n"
+        "請以專業親切型企業客服口吻回答，"
+        "若資料不足請明確表示並建議聯繫人工客服。"
+    )
 
 CATEGORY_KEYWORDS = {
     "產品介紹": ["產品", "方案", "規格", "功能", "比較", "介紹"],
@@ -217,7 +287,7 @@ def build_chat_transcript() -> str:
 # -----------------------------
 # AI 回覆函式
 # -----------------------------
-def generate_ai_response(
+def generate_openai_response(
     api_key: str,
     user_question: str,
     category: str,
@@ -237,12 +307,7 @@ def generate_ai_response(
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
                     "role": "user",
-                    "content": (
-                        f"使用者問題分類：{category}\n"
-                        f"使用者問題：{user_question}\n\n"
-                        "請以專業親切型企業客服口吻回答，"
-                        "若資料不足請明確表示並建議聯繫人工客服。"
-                    ),
+                    "content": build_ai_user_prompt(user_question, category),
                 },
             ],
         )
@@ -255,7 +320,82 @@ def generate_ai_response(
 
     except Exception:
         # 這裡不回傳技術細節，避免將複雜錯誤直接顯示給一般使用者。
-        return None, "api_error"
+        return None, "openai_api_error"
+
+
+def generate_gemini_response(
+    api_key: str,
+    user_question: str,
+    category: str,
+    model_name: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    """呼叫 Google Gemini API 產生客服回答。"""
+    if not api_key:
+        return None, "missing_api_key"
+
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+    payload = {
+        "systemInstruction": {
+            "parts": [{"text": SYSTEM_PROMPT}],
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": build_ai_user_prompt(user_question, category)}],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.3,
+        },
+    }
+
+    try:
+        response = requests.post(
+            endpoint,
+            params={"key": api_key},
+            json=payload,
+            timeout=45,
+        )
+
+        if response.status_code >= 400:
+            return None, "gemini_api_error"
+
+        data = response.json()
+        candidates = data.get("candidates", [])
+        if not candidates:
+            return None, "empty_response"
+
+        parts = candidates[0].get("content", {}).get("parts", [])
+        text_parts = [
+            str(part.get("text", "")).strip()
+            for part in parts
+            if str(part.get("text", "")).strip()
+        ]
+
+        answer = "\n".join(text_parts).strip()
+        if not answer:
+            return None, "empty_response"
+
+        return answer, None
+
+    except requests.RequestException:
+        return None, "gemini_api_error"
+    except Exception:
+        return None, "gemini_api_error"
+
+
+def generate_ai_response(
+    ai_provider: str,
+    api_key: str,
+    user_question: str,
+    category: str,
+    model_name: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    """依供應商路由至對應 AI API。"""
+    if ai_provider == "gemini":
+        return generate_gemini_response(api_key, user_question, category, model_name)
+
+    return generate_openai_response(api_key, user_question, category, model_name)
 
 
 # -----------------------------
@@ -338,11 +478,10 @@ def build_sidebar() -> None:
             st.rerun()
 
 
-def render_service_overview(api_key: str, faq_count: int) -> None:
+def render_service_overview(ai_enabled: bool, mode_text: str, faq_count: int) -> None:
     """顯示服務狀態卡，讓畫面更像正式客服儀表板。"""
     user_message_count = sum(1 for m in st.session_state.messages if m.get("role") == "user")
-    mode_text = "AI + FAQ 雙模式" if api_key else "FAQ 模式（AI 未啟用）"
-    mode_class = "status-ok" if api_key else "status-warn"
+    mode_class = "status-ok" if ai_enabled else "status-warn"
     case_status = get_case_status()
 
     col1, col2, col3, col4 = st.columns(4)
@@ -442,7 +581,14 @@ def render_assistant_message(message: Dict, index: int) -> None:
         st.warning("很抱歉沒有解決您的問題，建議您留下聯絡方式或改由人工客服協助。")
 
 
-def build_answer(user_question: str, faq_data: List[Dict], api_key: str, ai_model: str) -> Dict:
+def build_answer(
+    user_question: str,
+    faq_data: List[Dict],
+    ai_provider: str,
+    api_key: str,
+    ai_model: str,
+    ai_source_label: str,
+) -> Dict:
     """依照規則產生回答：先 FAQ、再 AI、最後人工客服建議。"""
     best_faq, faq_score = find_best_faq(user_question, faq_data)
     category = classify_question(user_question, best_faq)
@@ -468,7 +614,7 @@ def build_answer(user_question: str, faq_data: List[Dict], api_key: str, ai_mode
     # 規則 2：FAQ 未命中且沒有 API Key，改用 FAQ-only 模式。
     if not api_key:
         fallback_text = (
-            "目前尚未設定 AI API Key，因此只能使用 FAQ 知識庫回答。\n\n"
+            "目前尚未設定可用的 AI API Key，因此只能使用 FAQ 知識庫回答。\n\n"
             "此問題在現有 FAQ 中資料不足，建議您聯繫人工客服進一步確認。\n"
             "還有其他需要我協助的地方嗎？"
         )
@@ -483,8 +629,8 @@ def build_answer(user_question: str, faq_data: List[Dict], api_key: str, ai_mode
         }
 
     # 規則 3：FAQ 未命中且有 API Key，呼叫 AI 產生回答。
-    ai_answer, error_code = generate_ai_response(api_key, user_question, category, ai_model)
-    source = "AI 智慧客服"
+    ai_answer, error_code = generate_ai_response(ai_provider, api_key, user_question, category, ai_model)
+    source = f"AI 智慧客服（{ai_source_label}）"
 
     if error_code is None and ai_answer:
         # 若 AI 回覆中明確提到資料不足或人工客服，系統同步標示建議轉人工客服。
@@ -511,17 +657,22 @@ def build_answer(user_question: str, faq_data: List[Dict], api_key: str, ai_mode
         "category": category,
         "content": fail_text,
         "suggest_human": True,
-        "source": "AI 智慧客服（暫時不可用）",
+        "source": f"AI 智慧客服（{ai_source_label} 暫時不可用）",
         "feedback": None,
     }
 
 
 def main() -> None:
     """主程式入口。"""
-    # 載入 .env 讓 OPENAI_API_KEY 可由環境變數讀取。
+    # 載入 .env 並解析供應商設定（OpenAI / Google Gemini）。
     load_dotenv()
-    api_key = get_runtime_setting("OPENAI_API_KEY", "")
-    ai_model = get_runtime_setting("OPENAI_MODEL", "gpt-4o-mini")
+    ai_config = resolve_ai_config()
+    ai_provider = ai_config.get("provider", "openai")
+    api_key = ai_config.get("api_key", "")
+    ai_model = ai_config.get("model", "gpt-4o-mini")
+    ai_mode_label = ai_config.get("provider_label", "未啟用")
+    ai_source_label = ai_config.get("source_label", "AI")
+    ai_enabled = bool(api_key)
 
     # 設定頁面樣式，讓整體看起來像企業客服系統。
     st.set_page_config(page_title="AI 智慧客服問答系統", page_icon="💬", layout="wide")
@@ -842,11 +993,14 @@ def main() -> None:
     st.caption("歡迎使用企業客服網站。系統會先提供 FAQ 標準答案，再由 AI 客服補充說明。")
 
     # 若尚未設定 API Key，主畫面顯示提醒，但系統仍可使用 FAQ 模式。
-    if not api_key:
-        st.info("目前尚未設定 AI API Key，因此只能使用 FAQ 知識庫回答。")
+    if not ai_enabled:
+        st.info("目前尚未設定可用的 AI API Key，因此只能使用 FAQ 知識庫回答。")
+    else:
+        st.caption(f"目前 AI 供應商：{ai_mode_label} ｜ 模型：{ai_model}")
 
     faq_data = load_faq_data(FAQ_FILE_PATH)
-    render_service_overview(api_key, len(faq_data))
+    mode_text = f"AI + FAQ 雙模式（{ai_mode_label}）" if ai_enabled else "FAQ 模式（AI 未啟用）"
+    render_service_overview(ai_enabled, mode_text, len(faq_data))
 
     selected_quick_question = show_quick_buttons()
     st.markdown("### 客服對話區")
@@ -890,7 +1044,14 @@ def main() -> None:
 
         # 產生客服回覆並存入聊天紀錄。
         with st.spinner("客服系統正在整理回覆，請稍候..."):
-            assistant_message = build_answer(final_question, faq_data, api_key, ai_model)
+            assistant_message = build_answer(
+                final_question,
+                faq_data,
+                ai_provider,
+                api_key,
+                ai_model,
+                ai_source_label,
+            )
         assistant_message["timestamp"] = current_timestamp()
         assistant_message["case_id"] = st.session_state.case_id
         assistant_message["agent_name"] = AGENT_PROFILE["name"]

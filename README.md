@@ -1,10 +1,16 @@
 # AI 智慧客服問答系統
 
 ## 1. 專案名稱
-AI 智慧客服問答系統（Python + Streamlit + FAQ + AI API）
+AI 智慧客服問答系統（Python + Streamlit + FAQ + OpenAI/Gemini API）
 
 ## 2. 專案簡介
 本專案是一個可直接執行、可部署到 Streamlit Community Cloud 的企業客服聊天系統。使用者在網頁輸入問題後，系統會先查詢 `faq.json`，若 FAQ 相似度不足，再改由 AI API 產生客服回答。
+
+系統支援雙供應商：
+- OpenAI
+- Google Gemini
+
+可透過 `AI_PROVIDER` 設定 `openai`、`gemini` 或 `auto`（自動偵測可用金鑰）。
 
 系統回覆會固定呈現以下資訊：
 - 問題分類
@@ -16,6 +22,7 @@ AI 智慧客服問答系統（Python + Streamlit + FAQ + AI API）
 - 聊天式介面（保留歷史對話）
 - FAQ 知識庫優先回答
 - FAQ 相似度低於 0.6 時，改用 AI 回覆
+- 支援 OpenAI / Google Gemini 切換
 - API Key 未設定時，自動退回 FAQ-only 模式
 - AI API 失敗時顯示友善錯誤訊息
 - 側邊欄顯示客服資訊與系統說明
@@ -47,17 +54,25 @@ AI 智慧客服問答系統（Python + Streamlit + FAQ + AI API）
 pip install -r requirements.txt
 ```
 
-## 6. API Key 設定方式（本機）
+## 6. API 與模型設定方式（本機）
 1. 將 `.env.example` 複製成 `.env`。
-2. 在 `.env` 填入您的 API Key：
+2. 在 `.env` 填入設定：
 
 ```env
+# 可設為 openai / gemini / auto
+AI_PROVIDER=auto
+
 OPENAI_API_KEY=你的 OpenAI API Key
 OPENAI_MODEL=gpt-4o-mini
+
+GOOGLE_API_KEY=你的 Google Gemini API Key
+GEMINI_MODEL=gemini-1.5-flash
 ```
 
 說明：
-- 若未設定 `OPENAI_API_KEY`，系統不會當掉，會自動使用 FAQ 模式。
+- `AI_PROVIDER=auto` 時，系統會優先使用可用金鑰（先 OpenAI，若無再 Gemini）。
+- 若指定 `AI_PROVIDER=openai` 或 `gemini`，則只會使用該供應商。
+- 若找不到可用金鑰，系統不會當掉，會自動使用 FAQ 模式。
 - 部署到 Streamlit Cloud 時，請改用 Secrets 設定（見第 8 節）。
 
 ## 7. 執行方式
@@ -93,14 +108,20 @@ git push -u origin main
 4. 點選 Advanced settings，貼上 Secrets：
 
 ```toml
+AI_PROVIDER = "auto"
+
 OPENAI_API_KEY = "你的 OpenAI API Key"
 OPENAI_MODEL = "gpt-4o-mini"
+
+GOOGLE_API_KEY = "你的 Google Gemini API Key"
+GEMINI_MODEL = "gemini-1.5-flash"
 ```
 
 5. 點選 Deploy，等待建置完成即可上線。
 
 ### 8.3 部署重點
 - `app.py` 已支援優先讀取環境變數，若無則讀取 Streamlit Secrets。
+- 同時支援 OpenAI 與 Google Gemini，可用 `AI_PROVIDER` 切換。
 - 若未設定 API Key，系統仍可用 FAQ 模式運作。
 
 ## 9. 如何修改 faq.json
@@ -124,11 +145,12 @@ OPENAI_MODEL = "gpt-4o-mini"
 可依下列情境測試：
 1. FAQ 命中測試：輸入「你們營業時間是幾點？」應優先回覆 FAQ 並顯示資料來源為 FAQ。
 2. AI 回覆測試：輸入 FAQ 未收錄問題（例如較複雜情境題），應改用 AI 回覆。
-3. API Key 缺少測試：移除 `.env` 或 Cloud Secrets 的 API Key，系統應顯示 FAQ-only 提示，不可崩潰。
-4. 回饋測試：點選 👍 / 👎，應出現對應回饋訊息。
-5. 清除紀錄測試：點選「清除對話紀錄」，聊天內容應被清空。
-6. 案件驗證測試：確認畫面顯示案件編號、時間戳記、客服人員資訊。
-7. 匯出測試：點選「下載對話紀錄（TXT）」可下載完整對話。
+3. 供應商切換測試：分別設定 `AI_PROVIDER=openai`、`gemini`、`auto`，確認回覆資料來源正確。
+4. API Key 缺少測試：移除 `.env` 或 Cloud Secrets 的 API Key，系統應顯示 FAQ-only 提示，不可崩潰。
+5. 回饋測試：點選 👍 / 👎，應出現對應回饋訊息。
+6. 清除紀錄測試：點選「清除對話紀錄」，聊天內容應被清空。
+7. 案件驗證測試：確認畫面顯示案件編號、時間戳記、客服人員資訊。
+8. 匯出測試：點選「下載對話紀錄（TXT）」可下載完整對話。
 
 ## 11. 常見錯誤排除
 1. 找不到 `faq.json`
@@ -136,18 +158,22 @@ OPENAI_MODEL = "gpt-4o-mini"
 - 處理：確認 `faq.json` 位於專案根目錄，檔名大小寫正確。
 
 2. API Key 未設定
-- 現象：顯示「目前尚未設定 AI API Key，因此只能使用 FAQ 知識庫回答。」
+- 現象：顯示「目前尚未設定可用的 AI API Key，因此只能使用 FAQ 知識庫回答。」
 - 處理：本機請檢查 `.env`，Cloud 請檢查 App 的 Secrets 設定後重新部署。
 
-3. AI 回覆失敗
+3. 指定了錯誤供應商
+- 現象：已填 API Key 但仍無法取得 AI 回覆。
+- 處理：確認 `AI_PROVIDER` 與金鑰類型一致（`openai` 對 `OPENAI_API_KEY`、`gemini` 對 `GOOGLE_API_KEY`）。
+
+4. AI 回覆失敗
 - 現象：顯示 AI 暫時無法回覆的友善訊息。
 - 處理：確認網路連線、API Key 是否有效、帳號額度是否正常。
 
-4. `streamlit` 指令不可用
+5. `streamlit` 指令不可用
 - 現象：終端機顯示找不到 `streamlit`。
 - 處理：改用 `python -m streamlit run app.py`。
 
-5. Cloud 部署失敗（Build Error）
+6. Cloud 部署失敗（Build Error）
 - 現象：Streamlit Cloud 顯示套件安裝失敗或啟動錯誤。
 - 處理：確認 `requirements.txt` 與 `runtime.txt` 已推送到 GitHub，並查看部署日誌定位錯誤。
 
