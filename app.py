@@ -767,16 +767,28 @@ def scroll_to_latest_message() -> None:
     components.html(
         """
         <script>
+        let attempts = 0;
+        const maxAttempts = 28;
+
         const runScroll = () => {
             const rootDoc = window.parent?.document;
-            if (!rootDoc) return;
+            if (!rootDoc) return false;
+
             const scroller = rootDoc.querySelector('[data-testid="stAppScrollToBottomContainer"]');
-            if (!scroller) return;
-            scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' });
+            if (!scroller) return false;
+
+            scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'auto' });
+            const distance = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop;
+            return distance <= 12;
         };
-        runScroll();
-        setTimeout(runScroll, 120);
-        setTimeout(runScroll, 360);
+
+        const timer = setInterval(() => {
+            attempts += 1;
+            const done = runScroll();
+            if (done || attempts >= maxAttempts) {
+                clearInterval(timer);
+            }
+        }, 120);
         </script>
         """,
         height=0,
