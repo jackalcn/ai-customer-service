@@ -5,6 +5,7 @@ from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
 from random import randint
+from time import monotonic
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -18,6 +19,10 @@ from openai import OpenAI
 FAQ_FILE_PATH = Path("faq.json")
 FAQ_MATCH_THRESHOLD = 0.6
 COMPANY_NAME = "NovaCare 企業客服中心"
+OPENAI_TIMEOUT_SECONDS = 20
+AI_CONNECT_TIMEOUT_SECONDS = 6
+AI_READ_TIMEOUT_SECONDS = 12
+AI_TOTAL_TIMEOUT_SECONDS = 25
 
 AGENT_PROFILE = {
     "name": "李美雅",
@@ -40,6 +45,7 @@ GEMINI_MODEL_FALLBACKS = ["gemini-2.0-flash-lite", "gemini-2.0-flash", "gemini-1
 
 AI_ERROR_HINTS = {
     "missing_api_key": "尚未設定可用的 API Key，請先在 Secrets 或 .env 補上金鑰。",
+    "ai_timeout": "AI 回覆逾時，可能是網路或服務壅塞，請稍後重試或簡化問題。",
     "openai_api_error": "OpenAI 呼叫失敗，請檢查金鑰、模型名稱與額度是否正常。",
     "gemini_invalid_api_key": "Google API Key 無效或已失效，請到 Google AI Studio 重新產生後更新 Secrets。",
     "gemini_permission_denied": "目前的 Google API Key 權限不足，請確認是否開啟 Generative Language API 並允許伺服器端呼叫。",
@@ -385,7 +391,7 @@ def generate_openai_response(
         return None, "missing_api_key"
 
     try:
-        client = OpenAI(api_key=api_key)
+        client = OpenAI(api_key=api_key, timeout=OPENAI_TIMEOUT_SECONDS)
 
         response = client.chat.completions.create(
             model=model_name,
@@ -405,7 +411,9 @@ def generate_openai_response(
 
         return answer, None
 
-    except Exception:
+    except Exception as exc:
+        if "timeout" in str(exc).lower():
+            return None, "ai_timeout"
         # 這裡不回傳技術細節，避免將複雜錯誤直接顯示給一般使用者。
         return None, "openai_api_error"
 
@@ -444,10 +452,18 @@ def generate_gemini_response(
     # v1beta 優先（完整支援 systemInstruction）；v1 作為相容備援
     api_versions = ["v1beta", "v1"]
     last_error_code = "gemini_api_error"
+    started_at = monotonic()
 
     try:
         for candidate_model in candidate_models:
             for api_version in api_versions:
+                if monotonic() - started_at >= AI_TOTAL_TIMEOUT_SECONDS:
+                    LOGGER.warning(
+                        "Gemini request timed out by total budget: %ss",
+                        AI_TOTAL_TIMEOUT_SECONDS,
+                    )
+                    return None, "ai_timeout"
+
                 endpoint = (
                     f"https://generativelanguage.googleapis.com/{api_version}/"
                     f"models/{candidate_model}:generateContent"
@@ -458,7 +474,7 @@ def generate_gemini_response(
                     endpoint,
                     params={"key": api_key},
                     json=payload,
-                    timeout=45,
+                    timeout=(AI_CONNECT_TIMEOUT_SECONDS, AI_READ_TIMEOUT_SECONDS),
                 )
 
                 if response.status_code >= 400:
@@ -513,6 +529,9 @@ def generate_gemini_response(
 
         return None, last_error_code
 
+    except requests.Timeout:
+        LOGGER.exception("Gemini request timeout")
+        return None, "ai_timeout"
     except requests.RequestException:
         LOGGER.exception("Gemini request exception")
         return None, "gemini_api_error"
@@ -834,8 +853,17 @@ def main() -> None:
         }
 
         :root {
-            --streamlit-header-height: 60px;
-            --main-top-safe-gap: calc(var(--streamlit-header-height) + 0.9rem);
+            --streamlit-header-height: 0px;
+            --main-top-safe-gap: 1rem;
+        }
+
+        header[data-testid="stHeader"],
+        [data-testid="stToolbar"],
+        [data-testid="stDecoration"],
+        button[kind="header"] {
+            display: none !important;
+            visibility: hidden !important;
+            height: 0 !important;
         }
 
         .block-container {
@@ -1207,14 +1235,29 @@ def main() -> None:
 
         # 產生客服回覆並存入聊天紀錄。
         with st.spinner("客服系統正在整理回覆，請稍候..."):
-            assistant_message = build_answer(
-                final_question,
-                faq_data,
-                ai_provider,
-                api_key,
-                ai_model,
-                ai_source_label,
-            )
+            try:
+                assistant_message = build_answer(
+                    final_question,
+                    faq_data,
+                    ai_provider,
+                    api_key,
+                    ai_model,
+                    ai_source_label,
+                )
+            except Exception:
+                LOGGER.exception("Unhandled error during answer generation")
+                assistant_message = {
+                    "role": "assistant",
+                    "category": classify_question(final_question),
+                    "content": (
+                        "抱歉，系統目前發生暫時性問題，已自動停止此次請求以避免卡住。\n"
+                        "建議您稍後再試，或改由人工客服協助處理。\n"
+                        "系統診斷代碼：internal_error"
+                    ),
+                    "suggest_human": True,
+                    "source": "系統保護機制",
+                    "feedback": None,
+                }
         assistant_message["timestamp"] = current_timestamp()
         assistant_message["case_id"] = st.session_state.case_id
         assistant_message["agent_name"] = AGENT_PROFILE["name"]
